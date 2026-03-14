@@ -26,5 +26,13 @@ python3 main.py \
   --min-points 5
 ```
 
+
+## Uso en Jupyter Notebook
+También puedes usar la versión de notebook `quadratic_regression.ipynb` para ejecutar el flujo paso a paso en Jupyter.
+
+```bash
+jupyter notebook quadratic_regression.ipynb
+```
+
 ## Nota de migración
 Este repositorio ahora está centrado en Python y ya no depende de implementación Java.
