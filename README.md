@@ -22,9 +22,18 @@ python3 main.py \
   --output output.txt \
   --tolerance 0.12 \
   --max-failed-predictions 4 \
+  --validation-mode avg \
   --significant-digits 6 \
   --min-points 5
 ```
+
+### Modos de validación
+- `avg`: valida por distancia absoluta promedio (`|y_real - y_parabola| <= tolerance`).
+- `envelope`: considera fallo cuando el precio queda **fuera** de la parábola (para `a>0`, debajo; para `a<0`, encima), con tolerancia.
+- `inner`: considera fallo cuando el precio queda **dentro** de la parábola; útil para detectar rechazo externo.
+
+## Pine Script para TradingView
+Se añadió `tradingview_quadratic_regression.pine` para probar el concepto visualmente en TradingView con los mismos modos (`avg`, `envelope`, `inner`) y filtros de tolerancia/fallos máximos.
 
 ## Nota de migración
 Este repositorio ahora está centrado en Python y ya no depende de implementación Java.
