@@ -17,10 +17,14 @@ f_solve3x3(a00, a01, a02, b0, a10, a11, a12, b1, a20, a21, a22, b2) =>
         [detA / det, detB / det, detC / det]
 
 f_fit(len) =>
-    float sx = 0.0
-    float sx2 = 0.0
-    float sx3 = 0.0
-    float sx4 = 0.0
+    // Closed-form sums for x in [0, len-1] => O(1) for x-moments.
+    l = float(len)
+    lm1 = l - 1.0
+    sx = l * lm1 / 2.0
+    sx2 = l * lm1 * (2.0 * l - 1.0) / 6.0
+    sx3 = math.pow(sx, 2)
+    sx4 = l * lm1 * (2.0 * l - 1.0) * (3.0 * l * l - 3.0 * l - 1.0) / 30.0
+
     float sy = 0.0
     float sxy = 0.0
     float sx2y = 0.0
@@ -29,15 +33,11 @@ f_fit(len) =>
         x = i
         y = close[i]
         x2 = x * x
-        sx += x
-        sx2 += x2
-        sx3 += x2 * x
-        sx4 += x2 * x2
         sy += y
         sxy += x * y
         sx2y += x2 * y
 
-    [a, b, c] = f_solve3x3(sx4, sx3, sx2, sx2y, sx3, sx2, sx, sxy, sx2, sx, len, sy)
+    [a, b, c] = f_solve3x3(sx4, sx3, sx2, sx2y, sx3, sx2, sx, sxy, sx2, sx, l, sy)
     [a, b, c]
 
 f_inside(a, y, yCurve, tol) =>
@@ -64,6 +64,8 @@ if not na(a)
         isAvgFail = math.abs(yCurve - y) > tolerance
         isFail = mode == "avg" ? isAvgFail : mode == "envelope" ? not isInside : isInside
         failed += isFail ? 1 : 0
+        if failed > maxFailed
+            break
 
 isValid = failed <= maxFailed
 xNow = 0

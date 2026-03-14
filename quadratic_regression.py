@@ -86,6 +86,48 @@ class FitSnapshot:
     parabola_side: int
 
 
+@dataclass
+class RunningMoments:
+    """Sufficient statistics for quadratic least squares.
+
+    Maintaining these values incrementally makes fitting O(1) with respect
+    to the current window size.
+    """
+
+    n: float = 0.0
+    sx: float = 0.0
+    sx2: float = 0.0
+    sx3: float = 0.0
+    sx4: float = 0.0
+    sy: float = 0.0
+    sxy: float = 0.0
+    sx2y: float = 0.0
+
+    def add(self, point: DataPoint) -> None:
+        x = point.x
+        y = point.y
+        x2 = x * x
+
+        self.n += 1.0
+        self.sx += x
+        self.sx2 += x2
+        self.sx3 += x2 * x
+        self.sx4 += x2 * x2
+        self.sy += y
+        self.sxy += x * y
+        self.sx2y += x2 * y
+
+    def clear(self) -> None:
+        self.n = 0.0
+        self.sx = 0.0
+        self.sx2 = 0.0
+        self.sx3 = 0.0
+        self.sx4 = 0.0
+        self.sy = 0.0
+        self.sxy = 0.0
+        self.sx2y = 0.0
+
+
 # ---------- Strategy ----------
 class QuadraticFittingStrategy(Protocol):
     def fit(self, points: list[DataPoint]) -> FitCoefficients:
@@ -97,20 +139,16 @@ class LeastSquaresQuadraticFittingStrategy:
 
     @timed("least_squares_fit")
     def fit(self, points: list[DataPoint]) -> FitCoefficients:
-        # Normal equations for y = a*x^2 + b*x + c
-        n = float(len(points))
-        sx = sum(p.x for p in points)
-        sx2 = sum(p.x**2 for p in points)
-        sx3 = sum(p.x**3 for p in points)
-        sx4 = sum(p.x**4 for p in points)
-        sy = sum(p.y for p in points)
-        sxy = sum(p.x * p.y for p in points)
-        sx2y = sum((p.x**2) * p.y for p in points)
+        moments = RunningMoments()
+        for point in points:
+            moments.add(point)
+        return self.fit_from_moments(moments)
 
+    def fit_from_moments(self, moments: RunningMoments) -> FitCoefficients:
         matrix = [
-            [sx4, sx3, sx2, sx2y],
-            [sx3, sx2, sx, sxy],
-            [sx2, sx, n, sy],
+            [moments.sx4, moments.sx3, moments.sx2, moments.sx2y],
+            [moments.sx3, moments.sx2, moments.sx, moments.sxy],
+            [moments.sx2, moments.sx, moments.n, moments.sy],
         ]
 
         try:
@@ -154,6 +192,7 @@ class QuadraticRegressionService:
         self._config = config
         self._strategy = strategy
         self._window: list[DataPoint] = []
+        self._moments = RunningMoments()
         self._snapshots: list[FitSnapshot] = []
 
     @property
@@ -163,14 +202,24 @@ class QuadraticRegressionService:
     @timed("process_point")
     def process_point(self, point: DataPoint) -> FitSnapshot | None:
         self._window.append(point)
+        self._moments.add(point)
         if len(self._window) < self._config.min_points:
             return None
 
-        coeffs = self._strategy.fit(self._window)
-        failed = self._count_failed_predictions(coeffs, self._window)
+        if isinstance(self._strategy, LeastSquaresQuadraticFittingStrategy):
+            coeffs = self._strategy.fit_from_moments(self._moments)
+        else:
+            coeffs = self._strategy.fit(self._window)
+        failed = self._count_failed_predictions(
+            coeffs,
+            self._window,
+            failure_threshold=self._config.max_failed_predictions,
+        )
 
         if failed > self._config.max_failed_predictions:
             self._window = [point]
+            self._moments.clear()
+            self._moments.add(point)
             return None
 
         snapshot = self._to_snapshot(coeffs)
@@ -182,27 +231,41 @@ class QuadraticRegressionService:
             self.process_point(point)
         return self.snapshots
 
-    def _count_failed_predictions(self, coeffs: FitCoefficients, points: list[DataPoint]) -> int:
+    def _count_failed_predictions(
+        self,
+        coeffs: FitCoefficients,
+        points: list[DataPoint],
+        failure_threshold: int,
+    ) -> int:
         tolerance = self._config.tolerance
         mode = self._config.validation_mode
+        failed = 0
 
-        if mode == "avg":
-            return sum(1 for p in points if abs(coeffs.predict(p.x) - p.y) > tolerance)
+        for point in points:
+            prediction = coeffs.predict(point.x)
+            is_inside = self._point_inside_parabola(coeffs.a, point.y, prediction, tolerance)
 
-        if mode == "envelope":
-            return sum(1 for p in points if not self._point_inside_parabola(coeffs, p, tolerance))
+            if mode == "avg":
+                is_fail = abs(prediction - point.y) > tolerance
+            elif mode == "envelope":
+                is_fail = not is_inside
+            elif mode == "inner":
+                is_fail = is_inside
+            else:
+                raise ValueError(f"Unsupported validation mode: {mode}")
 
-        if mode == "inner":
-            return sum(1 for p in points if self._point_inside_parabola(coeffs, p, tolerance))
+            if is_fail:
+                failed += 1
+                if failed > failure_threshold:
+                    return failed
 
-        raise ValueError(f"Unsupported validation mode: {mode}")
+        return failed
 
     @staticmethod
-    def _point_inside_parabola(coeffs: FitCoefficients, point: DataPoint, tolerance: float) -> bool:
-        y_curve = coeffs.predict(point.x)
-        if coeffs.a >= 0:
-            return point.y >= (y_curve - tolerance)
-        return point.y <= (y_curve + tolerance)
+    def _point_inside_parabola(a: float, y: float, y_curve: float, tolerance: float) -> bool:
+        if a >= 0:
+            return y >= (y_curve - tolerance)
+        return y <= (y_curve + tolerance)
 
     def _to_snapshot(self, coeffs: FitCoefficients) -> FitSnapshot:
         x_start = self._window[0].x
