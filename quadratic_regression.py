@@ -51,6 +51,8 @@ class FitConfig:
     validation_mode: ValidationMode = "avg"
     significant_digits: int = 6
     min_points: int = 5
+    smoothing_alpha: float = 0.35
+    prediction_horizon: int = 1
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ class FitSnapshot:
     b: float
     c: float
     y_calc: float
+    y_pred: float
     slope: float
     parabola_side: int
 
@@ -194,6 +197,7 @@ class QuadraticRegressionService:
         self._window: list[DataPoint] = []
         self._moments = RunningMoments()
         self._snapshots: list[FitSnapshot] = []
+        self._smoothed_coeffs: FitCoefficients | None = None
 
     @property
     def snapshots(self) -> list[FitSnapshot]:
@@ -210,6 +214,8 @@ class QuadraticRegressionService:
             coeffs = self._strategy.fit_from_moments(self._moments)
         else:
             coeffs = self._strategy.fit(self._window)
+
+        coeffs = self._smooth_coefficients(coeffs)
         failed = self._count_failed_predictions(
             coeffs,
             self._window,
@@ -220,6 +226,7 @@ class QuadraticRegressionService:
             self._window = [point]
             self._moments.clear()
             self._moments.add(point)
+            self._smoothed_coeffs = None
             return None
 
         snapshot = self._to_snapshot(coeffs)
@@ -271,6 +278,8 @@ class QuadraticRegressionService:
         x_start = self._window[0].x
         x_end = self._window[-1].x
         y_calc = coeffs.predict(x_end)
+        x_future = x_end + self._prediction_step() * max(1, self._config.prediction_horizon)
+        y_pred = coeffs.predict(x_future)
         return FitSnapshot(
             x_start=round(x_start, self._config.significant_digits),
             x_end=round(x_end, self._config.significant_digits),
@@ -278,9 +287,31 @@ class QuadraticRegressionService:
             b=round(coeffs.b, self._config.significant_digits),
             c=round(coeffs.c, self._config.significant_digits),
             y_calc=round(y_calc, self._config.significant_digits),
+            y_pred=round(y_pred, self._config.significant_digits),
             slope=round(coeffs.slope(x_end), self._config.significant_digits),
             parabola_side=coeffs.side_of_parabola(x_end),
         )
+
+    def _smooth_coefficients(self, coeffs: FitCoefficients) -> FitCoefficients:
+        alpha = min(1.0, max(0.0, self._config.smoothing_alpha))
+        previous = self._smoothed_coeffs
+        if previous is None:
+            self._smoothed_coeffs = coeffs
+            return coeffs
+
+        smoothed = FitCoefficients(
+            a=alpha * coeffs.a + (1.0 - alpha) * previous.a,
+            b=alpha * coeffs.b + (1.0 - alpha) * previous.b,
+            c=alpha * coeffs.c + (1.0 - alpha) * previous.c,
+        )
+        self._smoothed_coeffs = smoothed
+        return smoothed
+
+    def _prediction_step(self) -> float:
+        if len(self._window) >= 2:
+            delta = self._window[-1].x - self._window[-2].x
+            return delta if delta != 0 else 1.0
+        return 1.0
 
 
 # ---------- I/O ----------
@@ -306,6 +337,7 @@ def write_snapshots(output_path: Path, snapshots: Iterable[FitSnapshot]) -> None
                     s.b,
                     s.c,
                     s.y_calc,
+                    s.y_pred,
                     s.slope,
                     s.parabola_side,
                 ],
