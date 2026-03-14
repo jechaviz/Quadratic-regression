@@ -49,7 +49,10 @@ float b = na
 float c = na
 
 if bar_index >= length
-    [a, b, c] := f_fit(length)
+    [nextA, nextB, nextC] = f_fit(length)
+    a := nextA
+    b := nextB
+    c := nextC
 
 failed = 0
 if not na(a)
