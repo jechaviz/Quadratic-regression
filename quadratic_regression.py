@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from math import log, sqrt
 from time import perf_counter
 from typing import Callable, Iterable, Literal, Protocol
 
@@ -51,8 +52,10 @@ class FitConfig:
     validation_mode: ValidationMode = "avg"
     significant_digits: int = 6
     min_points: int = 5
-    smoothing_alpha: float = 0.35
     prediction_horizon: int = 1
+    markov_lookback: int = 30
+    hurst_min_points: int = 20
+    predictive_strength: float = 0.65
 
 
 @dataclass(frozen=True)
@@ -197,7 +200,6 @@ class QuadraticRegressionService:
         self._window: list[DataPoint] = []
         self._moments = RunningMoments()
         self._snapshots: list[FitSnapshot] = []
-        self._smoothed_coeffs: FitCoefficients | None = None
 
     @property
     def snapshots(self) -> list[FitSnapshot]:
@@ -215,7 +217,6 @@ class QuadraticRegressionService:
         else:
             coeffs = self._strategy.fit(self._window)
 
-        coeffs = self._smooth_coefficients(coeffs)
         failed = self._count_failed_predictions(
             coeffs,
             self._window,
@@ -226,7 +227,6 @@ class QuadraticRegressionService:
             self._window = [point]
             self._moments.clear()
             self._moments.add(point)
-            self._smoothed_coeffs = None
             return None
 
         snapshot = self._to_snapshot(coeffs)
@@ -278,7 +278,7 @@ class QuadraticRegressionService:
         x_start = self._window[0].x
         x_end = self._window[-1].x
         y_calc = coeffs.predict(x_end)
-        x_future = x_end + self._prediction_step() * max(1, self._config.prediction_horizon)
+        x_future = self._predictive_future_x(x_end, coeffs)
         y_pred = coeffs.predict(x_future)
         return FitSnapshot(
             x_start=round(x_start, self._config.significant_digits),
@@ -292,20 +292,74 @@ class QuadraticRegressionService:
             parabola_side=coeffs.side_of_parabola(x_end),
         )
 
-    def _smooth_coefficients(self, coeffs: FitCoefficients) -> FitCoefficients:
-        alpha = min(1.0, max(0.0, self._config.smoothing_alpha))
-        previous = self._smoothed_coeffs
-        if previous is None:
-            self._smoothed_coeffs = coeffs
-            return coeffs
+    def _markov_bias(self) -> float:
+        lookback = max(4, self._config.markov_lookback)
+        ys = [p.y for p in self._window[-(lookback + 1) :]]
+        if len(ys) < 4:
+            return 0.0
 
-        smoothed = FitCoefficients(
-            a=alpha * coeffs.a + (1.0 - alpha) * previous.a,
-            b=alpha * coeffs.b + (1.0 - alpha) * previous.b,
-            c=alpha * coeffs.c + (1.0 - alpha) * previous.c,
-        )
-        self._smoothed_coeffs = smoothed
-        return smoothed
+        states: list[int] = []
+        for i in range(1, len(ys)):
+            states.append(1 if ys[i] >= ys[i - 1] else -1)
+
+        uu = ud = du = dd = 1e-9
+        for prev, curr in zip(states, states[1:]):
+            if prev == 1 and curr == 1:
+                uu += 1
+            elif prev == 1 and curr == -1:
+                ud += 1
+            elif prev == -1 and curr == 1:
+                du += 1
+            else:
+                dd += 1
+
+        last_state = states[-1]
+        if last_state == 1:
+            p_up = uu / (uu + ud)
+        else:
+            p_up = du / (du + dd)
+
+        return 2.0 * p_up - 1.0
+
+    def _hurst_exponent(self) -> float:
+        n = len(self._window)
+        if n < self._config.hurst_min_points:
+            return 0.5
+
+        ys = [p.y for p in self._window]
+        mean = sum(ys) / n
+        centered = [y - mean for y in ys]
+
+        cumulative = 0.0
+        cum_values: list[float] = []
+        for v in centered:
+            cumulative += v
+            cum_values.append(cumulative)
+
+        r = max(cum_values) - min(cum_values)
+        variance = sum(v * v for v in centered) / n
+        s = sqrt(variance)
+        if s <= 1e-12 or r <= 1e-12 or n <= 1:
+            return 0.5
+
+        h = log(r / s) / log(float(n))
+        return min(1.0, max(0.0, h))
+
+    def _predictive_future_x(self, x_end: float, coeffs: FitCoefficients) -> float:
+        step = self._prediction_step()
+        horizon = step * max(1, self._config.prediction_horizon)
+
+        markov_bias = self._markov_bias()
+        hurst = self._hurst_exponent()
+        memory_regime = (hurst - 0.5) * 2.0
+
+        slope_state = 1.0 if coeffs.slope(x_end) >= 0 else -1.0
+        directional_bias = 0.5 * markov_bias + 0.5 * slope_state
+
+        boost = 1.0 + self._config.predictive_strength * directional_bias * memory_regime
+        boost = min(2.5, max(0.25, boost))
+
+        return x_end + horizon * boost
 
     def _prediction_step(self) -> float:
         if len(self._window) >= 2:
@@ -370,7 +424,10 @@ def plot_regression(
         final = snapshots[-1]
         curve_x = sorted(xs)
         curve_y = [final.a * (x**2) + final.b * x + final.c for x in curve_x]
-        ax.plot(curve_x, curve_y, label="Ajuste cuadrático", color="#d62728", linewidth=2)
+        trend_up = final.y_pred >= final.y_calc
+        trend_color = "#78AFFF" if trend_up else "#FF96D2"
+        trend_label = "Ajuste cuadrático (subida)" if trend_up else "Ajuste cuadrático (bajada)"
+        ax.plot(curve_x, curve_y, label=trend_label, color=trend_color, linewidth=2)
 
     ax.set_title("Regresión cuadrática")
     ax.set_xlabel("x")

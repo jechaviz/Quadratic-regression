@@ -27,8 +27,10 @@ python3 main.py \
   --validation-mode avg \
   --significant-digits 6 \
   --min-points 5 \
-  --smoothing-alpha 0.35 \
-  --prediction-horizon 1
+  --prediction-horizon 1 \
+  --markov-lookback 30 \
+  --hurst-min-points 20 \
+  --predictive-strength 0.65
 ```
 
 
@@ -47,8 +49,10 @@ jupyter notebook quadratic_regression.ipynb
 Se añadió `tradingview_quadratic_regression.pine` para probar el concepto visualmente en TradingView con los mismos modos (`avg`, `envelope`, `inner`) y filtros de tolerancia/fallos máximos.
 
 ## Predicción y suavizado
-- Se aplica suavizado exponencial sobre `(a, b, c)` para estabilizar la curvatura entre ventanas.
-- `y_pred` proyecta la parábola a un horizonte configurable (`prediction-horizon`).
+- `y_pred` usa una proyección **predictiva** basada en una cadena de Markov de régimen (sube/baja) + exponente de Hurst (persistencia/mean-reversion).
+- `predictive-strength` controla cuánto pesa el componente predictivo sobre el horizonte base.
+- `markov-lookback` y `hurst-min-points` controlan la memoria estadística del predictor.
+- En las visualizaciones, la tendencia alcista se pinta en azul suave y la bajista en rosa suave para lectura rápida.
 - Se mantiene el enfoque incremental con estadísticas acumuladas y operaciones de frontera en tiempo constante para el ajuste.
 
 ## Nota de migración
