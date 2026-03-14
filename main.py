@@ -7,6 +7,7 @@ from quadratic_regression import (
     FitConfig,
     LeastSquaresQuadraticFittingStrategy,
     QuadraticRegressionService,
+    plot_regression,
     read_points,
     write_snapshots,
 )
@@ -26,6 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--significant-digits", type=int, default=6)
     parser.add_argument("--min-points", type=int, default=5)
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        default=Path("regression_plot.png"),
+        help="Ruta PNG de la gráfica generada con matplotlib",
+    )
     return parser
 
 
@@ -40,11 +47,14 @@ def main() -> None:
         min_points=args.min_points,
     )
     service = QuadraticRegressionService(config=config, strategy=LeastSquaresQuadraticFittingStrategy())
-    snapshots = service.run(read_points(args.input))
+    points = read_points(args.input)
+    snapshots = service.run(points)
     write_snapshots(args.output, snapshots)
+    plot_regression(args.plot_output, points, snapshots)
 
     print(f"Snapshots generated: {len(snapshots)}")
     print(f"Output file: {args.output}")
+    print(f"Plot file: {args.plot_output}")
 
 
 if __name__ == "__main__":

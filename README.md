@@ -9,6 +9,7 @@ Proyecto migrado a **Python puro** y optimizado para procesamiento incremental d
 - Código simple y mantenible siguiendo principios SOLID/DRY/KISS/YAGNI.
 - Salida tabular con estas columnas:
   `x_start, x_end, a, b, c, y_calc, slope, parabola_side`.
+- Gráfica generada con **matplotlib** (PNG), evitando Highcharts.
 
 ## Requisitos
 ```bash
@@ -20,6 +21,7 @@ python3 -m pip install -r requirements.txt
 python3 main.py \
   --input input.txt \
   --output output.txt \
+  --plot-output regression_plot.png \
   --tolerance 0.12 \
   --max-failed-predictions 4 \
   --validation-mode avg \

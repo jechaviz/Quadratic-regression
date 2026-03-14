@@ -251,3 +251,37 @@ def write_snapshots(output_path: Path, snapshots: Iterable[FitSnapshot]) -> None
         for s in snapshots
     ]
     output_path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+
+
+def plot_regression(
+    plot_path: Path,
+    points: list[DataPoint],
+    snapshots: list[FitSnapshot],
+) -> None:
+    """Genera una gráfica robusta usando matplotlib (sin Highcharts)."""
+    import matplotlib.pyplot as plt
+
+    if not points:
+        return
+
+    plt.style.use("seaborn-v0_8")
+    fig, ax = plt.subplots(figsize=(9, 5), dpi=130)
+
+    xs = [p.x for p in points]
+    ys = [p.y for p in points]
+    ax.scatter(xs, ys, label="Puntos observados", color="#1f77b4", alpha=0.8)
+
+    if snapshots:
+        final = snapshots[-1]
+        curve_x = sorted(xs)
+        curve_y = [final.a * (x**2) + final.b * x + final.c for x in curve_x]
+        ax.plot(curve_x, curve_y, label="Ajuste cuadrático", color="#d62728", linewidth=2)
+
+    ax.set_title("Regresión cuadrática")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    plt.close(fig)
