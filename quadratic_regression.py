@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import sqrt
 from pathlib import Path
+from math import log, sqrt
 from time import perf_counter
 from typing import Callable, Iterable, Literal, Protocol
 
