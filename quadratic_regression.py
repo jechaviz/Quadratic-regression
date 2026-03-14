@@ -9,6 +9,7 @@ This module intentionally keeps a clean, Python-first architecture with:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import sqrt
 from pathlib import Path
 from math import log, sqrt
 from time import perf_counter
@@ -94,11 +95,7 @@ class FitSnapshot:
 
 @dataclass
 class RunningMoments:
-    """Sufficient statistics for quadratic least squares.
-
-    Maintaining these values incrementally makes fitting O(1) with respect
-    to the current window size.
-    """
+    """Sufficient statistics for quadratic least squares."""
 
     n: float = 0.0
     sx: float = 0.0
@@ -134,6 +131,120 @@ class RunningMoments:
         self.sx2y = 0.0
 
 
+@dataclass
+class PredictiveState:
+    """Online O(1) predictor state using Markov transitions + persistence proxy.
+
+    Notes:
+    - Markov transitions are tracked with exponential forgetting (no window scans).
+    - Persistence (Hurst-like) is approximated from directional persistence and
+      trend/volatility balance, also in O(1).
+    """
+
+    prev_x: float | None = None
+    prev_y: float | None = None
+    prev_return: float = 0.0
+    prev_state: int | None = None
+    sample_count: int = 0
+
+    # transition counts (decayed)
+    uu: float = 1e-6
+    ud: float = 1e-6
+    du: float = 1e-6
+    dd: float = 1e-6
+
+    # running signal stats
+    ret_ema: float = 0.0
+    ret_var_ema: float = 0.0
+    accel_ema: float = 0.0
+    abs_ret_ema: float = 0.0
+
+    def reset(self) -> None:
+        self.prev_x = None
+        self.prev_y = None
+        self.prev_return = 0.0
+        self.prev_state = None
+        self.sample_count = 0
+        self.uu = self.ud = self.du = self.dd = 1e-6
+        self.ret_ema = 0.0
+        self.ret_var_ema = 0.0
+        self.accel_ema = 0.0
+        self.abs_ret_ema = 0.0
+
+    def update(self, point: DataPoint, lookback: int) -> None:
+        if self.prev_y is None or self.prev_x is None:
+            self.prev_x = point.x
+            self.prev_y = point.y
+            return
+
+        dx = point.x - self.prev_x
+        dx = dx if abs(dx) > 1e-12 else 1.0
+        ret = (point.y - self.prev_y) / dx
+        state = 1 if ret >= 0 else -1
+
+        lb = max(4, lookback)
+        alpha = 2.0 / (lb + 1.0)
+        decay = 1.0 - alpha
+
+        if self.prev_state is not None:
+            self.uu *= decay
+            self.ud *= decay
+            self.du *= decay
+            self.dd *= decay
+            if self.prev_state == 1 and state == 1:
+                self.uu += 1.0
+            elif self.prev_state == 1 and state == -1:
+                self.ud += 1.0
+            elif self.prev_state == -1 and state == 1:
+                self.du += 1.0
+            else:
+                self.dd += 1.0
+
+        delta = ret - self.ret_ema
+        self.ret_ema += alpha * delta
+        self.ret_var_ema = (1.0 - alpha) * self.ret_var_ema + alpha * (delta * delta)
+
+        accel = ret - self.prev_return
+        self.accel_ema = (1.0 - alpha) * self.accel_ema + alpha * accel
+        self.abs_ret_ema = (1.0 - alpha) * self.abs_ret_ema + alpha * abs(ret)
+
+        self.prev_return = ret
+        self.prev_state = state
+        self.prev_x = point.x
+        self.prev_y = point.y
+        self.sample_count += 1
+
+    def markov_bias(self) -> float:
+        if self.prev_state == 1:
+            p_up = self.uu / (self.uu + self.ud)
+        elif self.prev_state == -1:
+            p_up = self.du / (self.du + self.dd)
+        else:
+            return 0.0
+        return 2.0 * p_up - 1.0
+
+    def persistence_proxy(self, min_points: int) -> float:
+        """Returns a Hurst-like persistence score in [0, 1]."""
+        if self.sample_count < max(4, min_points):
+            return 0.5
+
+        p_stay_up = self.uu / (self.uu + self.ud)
+        p_stay_down = self.dd / (self.dd + self.du)
+        directional_persistence = 0.5 * (p_stay_up + p_stay_down)
+
+        volatility = sqrt(max(self.ret_var_ema, 1e-12))
+        trendiness = abs(self.ret_ema) / (abs(self.ret_ema) + volatility)
+
+        score = 0.5 + (directional_persistence - 0.5) * (0.4 + 0.6 * trendiness)
+        return max(0.0, min(1.0, score))
+
+    def volatility_penalty(self) -> float:
+        volatility = sqrt(max(self.ret_var_ema, 1e-12))
+        baseline = self.abs_ret_ema + 1e-9
+        ratio = volatility / (volatility + baseline)
+        return max(0.0, min(1.0, ratio))
+
+
 # ---------- Strategy ----------
 class QuadraticFittingStrategy(Protocol):
     def fit(self, points: list[DataPoint]) -> FitCoefficients:
@@ -160,7 +271,6 @@ class LeastSquaresQuadraticFittingStrategy:
         try:
             a, b, c = self._solve_3x3([row[:] for row in matrix])
         except ValueError:
-            # Small regularization to keep the stream stable on near-singular windows.
             lam = 1e-8
             matrix[0][0] += lam
             matrix[1][1] += lam
@@ -170,7 +280,6 @@ class LeastSquaresQuadraticFittingStrategy:
 
     @staticmethod
     def _solve_3x3(aug: list[list[float]]) -> tuple[float, float, float]:
-        # Gaussian elimination (KISS, deterministic, no hidden magic).
         for col in range(3):
             pivot = max(range(col, 3), key=lambda r: abs(aug[r][col]))
             aug[col], aug[pivot] = aug[pivot], aug[col]
@@ -200,6 +309,7 @@ class QuadraticRegressionService:
         self._window: list[DataPoint] = []
         self._moments = RunningMoments()
         self._snapshots: list[FitSnapshot] = []
+        self._predictive = PredictiveState()
 
     @property
     def snapshots(self) -> list[FitSnapshot]:
@@ -209,6 +319,8 @@ class QuadraticRegressionService:
     def process_point(self, point: DataPoint) -> FitSnapshot | None:
         self._window.append(point)
         self._moments.add(point)
+        self._predictive.update(point, self._config.markov_lookback)
+
         if len(self._window) < self._config.min_points:
             return None
 
@@ -227,6 +339,8 @@ class QuadraticRegressionService:
             self._window = [point]
             self._moments.clear()
             self._moments.add(point)
+            self._predictive.reset()
+            self._predictive.update(point, self._config.markov_lookback)
             return None
 
         snapshot = self._to_snapshot(coeffs)
@@ -292,73 +406,29 @@ class QuadraticRegressionService:
             parabola_side=coeffs.side_of_parabola(x_end),
         )
 
-    def _markov_bias(self) -> float:
-        lookback = max(4, self._config.markov_lookback)
-        ys = [p.y for p in self._window[-(lookback + 1) :]]
-        if len(ys) < 4:
-            return 0.0
-
-        states: list[int] = []
-        for i in range(1, len(ys)):
-            states.append(1 if ys[i] >= ys[i - 1] else -1)
-
-        uu = ud = du = dd = 1e-9
-        for prev, curr in zip(states, states[1:]):
-            if prev == 1 and curr == 1:
-                uu += 1
-            elif prev == 1 and curr == -1:
-                ud += 1
-            elif prev == -1 and curr == 1:
-                du += 1
-            else:
-                dd += 1
-
-        last_state = states[-1]
-        if last_state == 1:
-            p_up = uu / (uu + ud)
-        else:
-            p_up = du / (du + dd)
-
-        return 2.0 * p_up - 1.0
-
-    def _hurst_exponent(self) -> float:
-        n = len(self._window)
-        if n < self._config.hurst_min_points:
-            return 0.5
-
-        ys = [p.y for p in self._window]
-        mean = sum(ys) / n
-        centered = [y - mean for y in ys]
-
-        cumulative = 0.0
-        cum_values: list[float] = []
-        for v in centered:
-            cumulative += v
-            cum_values.append(cumulative)
-
-        r = max(cum_values) - min(cum_values)
-        variance = sum(v * v for v in centered) / n
-        s = sqrt(variance)
-        if s <= 1e-12 or r <= 1e-12 or n <= 1:
-            return 0.5
-
-        h = log(r / s) / log(float(n))
-        return min(1.0, max(0.0, h))
-
     def _predictive_future_x(self, x_end: float, coeffs: FitCoefficients) -> float:
         step = self._prediction_step()
         horizon = step * max(1, self._config.prediction_horizon)
 
-        markov_bias = self._markov_bias()
-        hurst = self._hurst_exponent()
-        memory_regime = (hurst - 0.5) * 2.0
+        markov_bias = self._predictive.markov_bias()
+        persistence = self._predictive.persistence_proxy(self._config.hurst_min_points)
+        memory_regime = (persistence - 0.5) * 2.0
 
         slope_state = 1.0 if coeffs.slope(x_end) >= 0 else -1.0
-        directional_bias = 0.5 * markov_bias + 0.5 * slope_state
+        accel_state = 1.0 if self._predictive.accel_ema >= 0 else -1.0
 
-        boost = 1.0 + self._config.predictive_strength * directional_bias * memory_regime
-        boost = min(2.5, max(0.25, boost))
+        directional_bias = 0.45 * markov_bias + 0.35 * slope_state + 0.20 * accel_state
+        volatility_penalty = self._predictive.volatility_penalty()
+        confidence = max(0.1, 1.0 - 0.7 * volatility_penalty)
 
+        # Curvature-aware push: if trend and curvature agree, allow slightly further projection.
+        curvature_alignment = 1.0 if (coeffs.a >= 0 and slope_state > 0) or (coeffs.a < 0 and slope_state < 0) else -1.0
+
+        boost = 1.0 + (
+            self._config.predictive_strength * directional_bias * memory_regime * confidence
+            + 0.10 * curvature_alignment * confidence
+        )
+        boost = min(2.8, max(0.25, boost))
         return x_end + horizon * boost
 
     def _prediction_step(self) -> float:

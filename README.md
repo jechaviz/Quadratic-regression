@@ -48,12 +48,12 @@ jupyter notebook quadratic_regression.ipynb
 ## Pine Script para TradingView
 Se añadió `tradingview_quadratic_regression.pine` para probar el concepto visualmente en TradingView con los mismos modos (`avg`, `envelope`, `inner`) y filtros de tolerancia/fallos máximos.
 
-## Predicción y suavizado
-- `y_pred` usa una proyección **predictiva** basada en una cadena de Markov de régimen (sube/baja) + exponente de Hurst (persistencia/mean-reversion).
-- `predictive-strength` controla cuánto pesa el componente predictivo sobre el horizonte base.
-- `markov-lookback` y `hurst-min-points` controlan la memoria estadística del predictor.
-- En las visualizaciones, la tendencia alcista se pinta en azul suave y la bajista en rosa suave para lectura rápida.
-- Se mantiene el enfoque incremental con estadísticas acumuladas y operaciones de frontera en tiempo constante para el ajuste.
+## Predicción online O(1)
+- `y_pred` se obtiene con un predictor **online O(1)**: sesgo Markov (transiciones con olvido exponencial) + proxy de persistencia tipo Hurst + control por volatilidad/aceleración/curvatura.
+- `predictive-strength` controla la agresividad del salto predictivo.
+- `markov-lookback` define la memoria efectiva del régimen; `hurst-min-points` fija el mínimo para activar el componente de persistencia.
+- La proyección aplica penalización por volatilidad para evitar sobre-extensión en ruido.
+- En visualización: azul suave para subida y rosa suave para bajada.
 
 ## Nota de migración
 Este repositorio ahora está centrado en Python y ya no depende de implementación Java.
