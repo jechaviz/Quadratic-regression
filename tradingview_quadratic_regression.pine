@@ -5,6 +5,8 @@ length = input.int(30, "Window", minval=5)
 mode = input.string("avg", "Validation mode", options=["avg", "envelope", "inner"])
 tolerance = input.float(0.12, "Tolerance", minval=0.0, step=0.01)
 maxFailed = input.int(4, "Max failed predictions", minval=0)
+smoothingAlpha = input.float(0.35, "Smoothing alpha", minval=0.0, maxval=1.0, step=0.01)
+predictionHorizon = input.int(1, "Prediction horizon", minval=1, maxval=20)
 
 f_solve3x3(a00, a01, a02, b0, a10, a11, a12, b1, a20, a21, a22, b2) =>
     det = a00 * (a11 * a22 - a12 * a21) - a01 * (a10 * a22 - a12 * a20) + a02 * (a10 * a21 - a11 * a20)
@@ -43,24 +45,34 @@ f_fit(len) =>
 f_inside(a, y, yCurve, tol) =>
     a >= 0 ? y >= (yCurve - tol) : y <= (yCurve + tol)
 
-var line curve = na
-float a = na
-float b = na
-float c = na
+var float aSmooth = na
+var float bSmooth = na
+var float cSmooth = na
 
 if bar_index >= length
-    [nextA, nextB, nextC] = f_fit(length)
-    a := nextA
-    b := nextB
-    c := nextC
+    [aFit, bFit, cFit] = f_fit(length)
+    if na(aFit)
+        aSmooth := na
+        bSmooth := na
+        cSmooth := na
+    else
+        if na(aSmooth)
+            aSmooth := aFit
+            bSmooth := bFit
+            cSmooth := cFit
+        else
+            oneMinus = 1.0 - smoothingAlpha
+            aSmooth := smoothingAlpha * aFit + oneMinus * aSmooth
+            bSmooth := smoothingAlpha * bFit + oneMinus * bSmooth
+            cSmooth := smoothingAlpha * cFit + oneMinus * cSmooth
 
 failed = 0
-if not na(a)
+if not na(aSmooth)
     for i = 0 to length - 1
         x = i
         y = close[i]
-        yCurve = a * x * x + b * x + c
-        isInside = f_inside(a, y, yCurve, tolerance)
+        yCurve = aSmooth * x * x + bSmooth * x + cSmooth
+        isInside = f_inside(aSmooth, y, yCurve, tolerance)
         isAvgFail = math.abs(yCurve - y) > tolerance
         isFail = mode == "avg" ? isAvgFail : mode == "envelope" ? not isInside : isInside
         failed += isFail ? 1 : 0
@@ -69,10 +81,14 @@ if not na(a)
 
 isValid = failed <= maxFailed
 xNow = 0
-yNow = na(a) ? na : a * xNow * xNow + b * xNow + c
+yNow = na(aSmooth) ? na : aSmooth * xNow * xNow + bSmooth * xNow + cSmooth
+xFuture = predictionHorizon
+yPred = na(aSmooth) ? na : aSmooth * xFuture * xFuture + bSmooth * xFuture + cSmooth
+
 plot(yNow, "Quadratic y_calc", color=isValid ? color.lime : color.red, linewidth=2)
+plot(yPred, "Quadratic y_pred", color=color.new(color.orange, 0), linewidth=2, style=plot.style_linebr)
 
 plotchar(isValid, "valid", "✓", location.top, color=color.lime, size=size.tiny)
-plotchar(not isValid and not na(a), "invalid", "✕", location.top, color=color.red, size=size.tiny)
+plotchar(not isValid and not na(aSmooth), "invalid", "✕", location.top, color=color.red, size=size.tiny)
 
 bgcolor(mode == "envelope" ? color.new(color.blue, 92) : mode == "inner" ? color.new(color.purple, 92) : color.new(color.green, 94))

@@ -27,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--significant-digits", type=int, default=6)
     parser.add_argument("--min-points", type=int, default=5)
+    parser.add_argument("--smoothing-alpha", type=float, default=0.35)
+    parser.add_argument("--prediction-horizon", type=int, default=1)
     parser.add_argument(
         "--plot-output",
         type=Path,
@@ -45,6 +47,8 @@ def main() -> None:
         validation_mode=args.validation_mode,
         significant_digits=args.significant_digits,
         min_points=args.min_points,
+        smoothing_alpha=args.smoothing_alpha,
+        prediction_horizon=args.prediction_horizon,
     )
     service = QuadraticRegressionService(config=config, strategy=LeastSquaresQuadraticFittingStrategy())
     points = read_points(args.input)

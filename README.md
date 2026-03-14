@@ -8,7 +8,7 @@ Proyecto migrado a **Python puro** y optimizado para procesamiento incremental d
 - Enfoque AOP con decoradores para métricas de rendimiento.
 - Código simple y mantenible siguiendo principios SOLID/DRY/KISS/YAGNI.
 - Salida tabular con estas columnas:
-  `x_start, x_end, a, b, c, y_calc, slope, parabola_side`.
+  `x_start, x_end, a, b, c, y_calc, y_pred, slope, parabola_side`.
 - Gráfica generada con **matplotlib** (PNG), evitando Highcharts.
 
 ## Requisitos
@@ -26,7 +26,9 @@ python3 main.py \
   --max-failed-predictions 4 \
   --validation-mode avg \
   --significant-digits 6 \
-  --min-points 5
+  --min-points 5 \
+  --smoothing-alpha 0.35 \
+  --prediction-horizon 1
 ```
 
 
@@ -43,6 +45,11 @@ jupyter notebook quadratic_regression.ipynb
 
 ## Pine Script para TradingView
 Se añadió `tradingview_quadratic_regression.pine` para probar el concepto visualmente en TradingView con los mismos modos (`avg`, `envelope`, `inner`) y filtros de tolerancia/fallos máximos.
+
+## Predicción y suavizado
+- Se aplica suavizado exponencial sobre `(a, b, c)` para estabilizar la curvatura entre ventanas.
+- `y_pred` proyecta la parábola a un horizonte configurable (`prediction-horizon`).
+- Se mantiene el enfoque incremental con estadísticas acumuladas y operaciones de frontera en tiempo constante para el ajuste.
 
 ## Nota de migración
 Este repositorio ahora está centrado en Python y ya no depende de implementación Java.
