@@ -5,21 +5,22 @@ length = input.int(30, "Window", minval=5)
 mode = input.string("avg", "Validation mode", options=["avg", "envelope", "inner"])
 tolerance = input.float(0.12, "Tolerance", minval=0.0, step=0.01)
 maxFailed = input.int(4, "Max failed predictions", minval=0)
-smoothingAlpha = input.float(0.35, "Smoothing alpha", minval=0.0, maxval=1.0, step=0.01)
 predictionHorizon = input.int(1, "Prediction horizon", minval=1, maxval=20)
+markovLookback = input.int(30, "Markov lookback", minval=4, maxval=300)
+hurstMinPoints = input.int(20, "Persistence min points", minval=4, maxval=300)
+predictiveStrength = input.float(0.65, "Predictive strength", minval=0.0, maxval=2.0, step=0.05)
 
 f_solve3x3(a00, a01, a02, b0, a10, a11, a12, b1, a20, a21, a22, b2) =>
     det = a00 * (a11 * a22 - a12 * a21) - a01 * (a10 * a22 - a12 * a20) + a02 * (a10 * a21 - a11 * a20)
     if math.abs(det) < 1e-10
-        [na, na, na]
+        [0.0, 0.0, 0.0, false]
     else
         detA = b0 * (a11 * a22 - a12 * a21) - a01 * (b1 * a22 - a12 * b2) + a02 * (b1 * a21 - a11 * b2)
         detB = a00 * (b1 * a22 - a12 * b2) - b0 * (a10 * a22 - a12 * a20) + a02 * (a10 * b2 - b1 * a20)
         detC = a00 * (a11 * b2 - b1 * a21) - a01 * (a10 * b2 - b1 * a20) + b0 * (a10 * a21 - a11 * a20)
-        [detA / det, detB / det, detC / det]
+        [detA / det, detB / det, detC / det, true]
 
 f_fit(len) =>
-    // Closed-form sums for x in [0, len-1] => O(1) for x-moments.
     l = float(len)
     lm1 = l - 1.0
     sx = l * lm1 / 2.0
@@ -39,40 +40,72 @@ f_fit(len) =>
         sxy += x * y
         sx2y += x2 * y
 
-    [a, b, c] = f_solve3x3(sx4, sx3, sx2, sx2y, sx3, sx2, sx, sxy, sx2, sx, l, sy)
-    [a, b, c]
+    [a, b, c, ok] = f_solve3x3(sx4, sx3, sx2, sx2y, sx3, sx2, sx, sxy, sx2, sx, l, sy)
+    [a, b, c, ok]
 
 f_inside(a, y, yCurve, tol) =>
     a >= 0 ? y >= (yCurve - tol) : y <= (yCurve + tol)
 
-var float aSmooth = na
-var float bSmooth = na
-var float cSmooth = na
+alpha = 2.0 / (markovLookback + 1.0)
+decay = 1.0 - alpha
 
-if bar_index >= length
-    [aFit, bFit, cFit] = f_fit(length)
-    if na(aFit)
-        aSmooth := na
-        bSmooth := na
-        cSmooth := na
-    else
-        if na(aSmooth)
-            aSmooth := aFit
-            bSmooth := bFit
-            cSmooth := cFit
+var float uu = 1e-6
+var float ud = 1e-6
+var float du = 1e-6
+var float dd = 1e-6
+var float retEma = 0.0
+var float retVarEma = 0.0
+var float accelEma = 0.0
+var float absRetEma = 0.0
+var float prevRet = 0.0
+var int prevState = 0
+var int sampleCount = 0
+
+if bar_index > 0
+    ret = close - close[1]
+    state = ret >= 0 ? 1 : -1
+
+    if prevState != 0
+        uu := uu * decay
+        ud := ud * decay
+        du := du * decay
+        dd := dd * decay
+        if prevState == 1 and state == 1
+            uu += 1.0
+        else if prevState == 1 and state == -1
+            ud += 1.0
+        else if prevState == -1 and state == 1
+            du += 1.0
         else
-            oneMinus = 1.0 - smoothingAlpha
-            aSmooth := smoothingAlpha * aFit + oneMinus * aSmooth
-            bSmooth := smoothingAlpha * bFit + oneMinus * bSmooth
-            cSmooth := smoothingAlpha * cFit + oneMinus * cSmooth
+            dd += 1.0
+
+    d = ret - retEma
+    retEma += alpha * d
+    retVarEma := (1.0 - alpha) * retVarEma + alpha * (d * d)
+    accelEma := (1.0 - alpha) * accelEma + alpha * (ret - prevRet)
+    absRetEma := (1.0 - alpha) * absRetEma + alpha * math.abs(ret)
+
+    prevRet := ret
+    prevState := state
+    sampleCount += 1
+
+float aModel = na
+float bModel = na
+float cModel = na
+if bar_index >= length
+    [aFit, bFit, cFit, okFit] = f_fit(length)
+    if okFit
+        aModel := aFit
+        bModel := bFit
+        cModel := cFit
 
 failed = 0
-if not na(aSmooth)
+if not na(aModel)
     for i = 0 to length - 1
         x = i
         y = close[i]
-        yCurve = aSmooth * x * x + bSmooth * x + cSmooth
-        isInside = f_inside(aSmooth, y, yCurve, tolerance)
+        yCurve = aModel * x * x + bModel * x + cModel
+        isInside = f_inside(aModel, y, yCurve, tolerance)
         isAvgFail = math.abs(yCurve - y) > tolerance
         isFail = mode == "avg" ? isAvgFail : mode == "envelope" ? not isInside : isInside
         failed += isFail ? 1 : 0
@@ -80,15 +113,38 @@ if not na(aSmooth)
             break
 
 isValid = failed <= maxFailed
-xNow = 0
-yNow = na(aSmooth) ? na : aSmooth * xNow * xNow + bSmooth * xNow + cSmooth
-xFuture = predictionHorizon
-yPred = na(aSmooth) ? na : aSmooth * xFuture * xFuture + bSmooth * xFuture + cSmooth
+xNow = 0.0
+yNow = na(aModel) ? na : aModel * xNow * xNow + bModel * xNow + cModel
 
-plot(yNow, "Quadratic y_calc", color=isValid ? color.lime : color.red, linewidth=2)
-plot(yPred, "Quadratic y_pred", color=color.new(color.orange, 0), linewidth=2, style=plot.style_linebr)
+markovBias = prevState == 1 ? (2.0 * (uu / (uu + ud)) - 1.0) : prevState == -1 ? (2.0 * (du / (du + dd)) - 1.0) : 0.0
+pStayUp = uu / (uu + ud)
+pStayDown = dd / (dd + du)
+directionalPersistence = 0.5 * (pStayUp + pStayDown)
+volatility = math.sqrt(math.max(retVarEma, 1e-12))
+trendiness = math.abs(retEma) / (math.abs(retEma) + volatility)
+persistence = sampleCount < hurstMinPoints ? 0.5 : math.max(0.0, math.min(1.0, 0.5 + (directionalPersistence - 0.5) * (0.4 + 0.6 * trendiness)))
 
-plotchar(isValid, "valid", "✓", location.top, color=color.lime, size=size.tiny)
-plotchar(not isValid and not na(aSmooth), "invalid", "✕", location.top, color=color.red, size=size.tiny)
+memoryRegime = (persistence - 0.5) * 2.0
+slopeState = na(bModel) ? 0.0 : (bModel >= 0 ? 1.0 : -1.0)
+accelState = accelEma >= 0 ? 1.0 : -1.0
+directionalBias = 0.45 * markovBias + 0.35 * slopeState + 0.20 * accelState
+volPenalty = volatility / (volatility + absRetEma + 1e-9)
+confidence = math.max(0.1, 1.0 - 0.7 * volPenalty)
+curvatureAlignment = na(aModel) ? 0.0 : ((aModel >= 0 and slopeState > 0) or (aModel < 0 and slopeState < 0) ? 1.0 : -1.0)
 
-bgcolor(mode == "envelope" ? color.new(color.blue, 92) : mode == "inner" ? color.new(color.purple, 92) : color.new(color.green, 94))
+boostRaw = 1.0 + predictiveStrength * directionalBias * memoryRegime * confidence + 0.10 * curvatureAlignment * confidence
+boost = math.max(0.25, math.min(2.8, boostRaw))
+
+xFuture = predictionHorizon * boost
+yPred = na(aModel) ? na : aModel * xFuture * xFuture + bModel * xFuture + cModel
+
+isUp = not na(yNow) and not na(yPred) ? yPred >= yNow : false
+softBlue = color.rgb(120, 175, 255)
+softPink = color.rgb(255, 150, 210)
+trendColor = isUp ? softBlue : softPink
+
+plot(yNow, "Quadratic y_calc", color=color.new(trendColor, isValid ? 0 : 35), linewidth=2)
+plot(yPred, "Quadratic y_pred", color=color.new(trendColor, 10), linewidth=2, style=plot.style_linebr)
+plotchar(isValid, "valid", "✓", location.top, color=color.new(softBlue, 0), size=size.tiny)
+plotchar(not isValid and not na(aModel), "invalid", "✕", location.top, color=color.new(softPink, 0), size=size.tiny)
+bgcolor(color.new(trendColor, mode == "avg" ? 92 : 90))
