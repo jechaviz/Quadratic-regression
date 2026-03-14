@@ -18,6 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=Path("output.txt"), help="Output TSV path")
     parser.add_argument("--tolerance", type=float, default=0.12)
     parser.add_argument("--max-failed-predictions", type=int, default=4)
+    parser.add_argument(
+        "--validation-mode",
+        choices=["avg", "envelope", "inner"],
+        default="avg",
+        help="avg: distancia media; envelope: precio dentro de la parábola; inner: precio fuera",
+    )
     parser.add_argument("--significant-digits", type=int, default=6)
     parser.add_argument("--min-points", type=int, default=5)
     return parser
@@ -29,6 +35,7 @@ def main() -> None:
     config = FitConfig(
         tolerance=args.tolerance,
         max_failed_predictions=args.max_failed_predictions,
+        validation_mode=args.validation_mode,
         significant_digits=args.significant_digits,
         min_points=args.min_points,
     )

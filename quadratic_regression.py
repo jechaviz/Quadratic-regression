@@ -11,7 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Callable, Iterable, Protocol
+from typing import Callable, Iterable, Literal, Protocol
+
+
+ValidationMode = Literal["avg", "envelope", "inner"]
 
 
 # ---------- AOP utility ----------
@@ -45,6 +48,7 @@ class DataPoint:
 class FitConfig:
     tolerance: float
     max_failed_predictions: int
+    validation_mode: ValidationMode = "avg"
     significant_digits: int = 6
     min_points: int = 5
 
@@ -180,7 +184,25 @@ class QuadraticRegressionService:
 
     def _count_failed_predictions(self, coeffs: FitCoefficients, points: list[DataPoint]) -> int:
         tolerance = self._config.tolerance
-        return sum(1 for p in points if abs(coeffs.predict(p.x) - p.y) > tolerance)
+        mode = self._config.validation_mode
+
+        if mode == "avg":
+            return sum(1 for p in points if abs(coeffs.predict(p.x) - p.y) > tolerance)
+
+        if mode == "envelope":
+            return sum(1 for p in points if not self._point_inside_parabola(coeffs, p, tolerance))
+
+        if mode == "inner":
+            return sum(1 for p in points if self._point_inside_parabola(coeffs, p, tolerance))
+
+        raise ValueError(f"Unsupported validation mode: {mode}")
+
+    @staticmethod
+    def _point_inside_parabola(coeffs: FitCoefficients, point: DataPoint, tolerance: float) -> bool:
+        y_curve = coeffs.predict(point.x)
+        if coeffs.a >= 0:
+            return point.y >= (y_curve - tolerance)
+        return point.y <= (y_curve + tolerance)
 
     def _to_snapshot(self, coeffs: FitCoefficients) -> FitSnapshot:
         x_start = self._window[0].x
