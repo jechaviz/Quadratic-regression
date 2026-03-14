@@ -29,6 +29,13 @@ python3 main.py \
   --min-points 5
 ```
 
+
+## Uso en Jupyter Notebook
+También puedes usar la versión de notebook `quadratic_regression.ipynb` para ejecutar el flujo paso a paso en Jupyter.
+
+```bash
+jupyter notebook quadratic_regression.ipynb
+```
 ### Modos de validación
 - `avg`: valida por distancia absoluta promedio (`|y_real - y_parabola| <= tolerance`).
 - `envelope`: considera fallo cuando el precio queda **fuera** de la parábola (para `a>0`, debajo; para `a<0`, encima), con tolerancia.
