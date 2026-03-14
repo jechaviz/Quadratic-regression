@@ -44,7 +44,12 @@ f_inside(a, y, yCurve, tol) =>
     a >= 0 ? y >= (yCurve - tol) : y <= (yCurve + tol)
 
 var line curve = na
-[a, b, c] = bar_index >= length ? f_fit(length) : [na, na, na]
+float a = na
+float b = na
+float c = na
+
+if bar_index >= length
+    [a, b, c] := f_fit(length)
 
 failed = 0
 if not na(a)
